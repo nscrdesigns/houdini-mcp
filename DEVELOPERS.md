@@ -1,31 +1,85 @@
 # HoudiniMCP Developer Guide
 
-This guide is intended for developers who want to extend or modify the HoudiniMCP functionality.
+Guide for developers extending or modifying HoudiniMCP.
 
 ## Architecture Overview
 
-HoudiniMCP consists of two main components that work together:
-
-1. **Houdini Addon** (`addon.py`): A Python module that runs within Houdini and sets up a socket server to receive commands.
-2. **MCP Server** (`server.py`): A Python module that implements the Model Context Protocol (MCP) specification and forwards commands to Houdini.
-
-Here's how the components interact:
-
 ```
-Claude AI <--> MCP Server <--> Socket Connection <--> Houdini Addon <--> Houdini
+Claude AI  <-->  MCP Server (stdio)  <-->  TCP Socket  <-->  Houdini Addon  <-->  Houdini
 ```
+
+### Components
+
+| Component | File | Description |
+|-----------|------|-------------|
+| MCP Server | `src/houdini_mcp/server.py` | FastMCP server, stdio transport. Discovers addon instances, exposes 28 tools to Claude. |
+| Houdini Addon | `houdinimcp_addon.py` | Runs inside Houdini. Socket server, command handlers, dynamic port binding. |
+| Installer | `install.py` | Deploys Houdini package + 123.py hook for auto-start. |
+| Package template | `houdini/packages/houdinimcp.json` | Template for the Houdini package file. |
+
+### Communication Protocol
+
+Commands are JSON objects sent over TCP:
+```json
+{"type": "command_name", "params": {"key": "value"}}
+```
+
+Responses:
+```json
+{"status": "success", "result": {...}}
+{"status": "error", "message": "error description"}
+```
+
+The addon uses chunked receive with JSON-completeness checking (brace counting) to handle large responses.
+
+## Multi-Instance Architecture
+
+### Dynamic Port Allocation
+
+The addon tries ports 9877-9886 sequentially. First available port wins. This allows multiple Houdini sessions to run simultaneously without configuration.
+
+### Port Files
+
+Each running instance writes a port file to advertise itself:
+
+| Platform | Location |
+|----------|----------|
+| Windows | `%LOCALAPPDATA%\HoudiniMCP\instances\houdini_{port}.json` |
+| Linux/Mac | `~/.local/share/houdinimcp/instances/houdini_{port}.json` |
+
+Port file contents:
+```json
+{
+  "port": 9877,
+  "pid": 12345,
+  "hip_file": "C:/scenes/project.hip",
+  "hip_name": "project.hip",
+  "houdini_version": "21.0.506",
+  "started_at": "2026-02-22T14:30:00",
+  "hostname": "localhost"
+}
+```
+
+### Instance Discovery
+
+The MCP server discovers instances by:
+1. Scanning the port file directory for `houdini_*.json` files
+2. Validating each PID is still alive (stale files are cleaned up)
+3. Connecting to the most recently started instance by default
+
+Connection priority:
+1. Reuse existing healthy connection
+2. User-specified port (via `connect_to_houdini` tool)
+3. Newest discovered instance
+4. Fallback to port 9877 (backward compatibility)
 
 ## Adding New Tools
 
-To add a new tool to HoudiniMCP, you need to modify both the addon and the server components.
+To add a new tool, modify both the addon and the server.
 
-### Step 1: Add a new command handler in addon.py
+### Step 1: Add a command handler in `houdinimcp_addon.py`
 
-1. Locate the `execute_command` method in the `HoudiniMCPServer` class.
-2. Add your new command to the `handlers` dictionary.
-3. Implement a new method in the class to handle your command.
-
-Example:
+In the `execute_command` method, add your command to the `handlers` dictionary and implement the handler method:
 
 ```python
 # In the handlers dictionary
@@ -34,16 +88,11 @@ handlers = {
     "my_new_command": self.my_new_command,
 }
 
-# Add a new method to handle the command
+# Handler method
 def my_new_command(self, param1, param2=None):
-    """Documentation for what this command does"""
     try:
-        # Implement your command logic here
-        result = {
-            "success": True,
-            "param1": param1,
-            "custom_data": "Some processed data"
-        }
+        # Your Houdini logic here
+        result = {"success": True, "data": "some_value"}
         return result
     except Exception as e:
         print(f"Error in my_new_command: {str(e)}")
@@ -51,176 +100,74 @@ def my_new_command(self, param1, param2=None):
         return {"error": str(e)}
 ```
 
-### Step 2: Add a new tool in server.py
-
-1. Add a new tool function with the `@mcp.tool()` decorator.
-2. Implement the tool to forward the command to Houdini.
-
-Example:
+### Step 2: Add a tool in `src/houdini_mcp/server.py`
 
 ```python
 @mcp.tool()
-def my_new_tool(
-    ctx: Context,
-    param1: str,
-    param2: Optional[str] = None
-) -> str:
+def my_new_tool(ctx: Context, param1: str, param2: Optional[str] = None) -> str:
     """
     Description of what this tool does.
-    
+
     Parameters:
-    - param1: Description of first parameter
-    - param2: Description of second parameter (optional)
-    
-    Returns:
-    Information about the operation result.
+    - param1: Description
+    - param2: Description (optional)
     """
     try:
         houdini = get_houdini_connection()
-        
         result = houdini.send_command("my_new_command", {
             "param1": param1,
             "param2": param2
         })
-        
+
         if "error" in result:
-            return f"Error executing command: {result['error']}"
-        
-        # Return a user-friendly message
-        return f"Successfully executed command with param1={param1}"
+            return f"Error: {result['error']}"
+
+        return f"Success: {result['data']}"
     except Exception as e:
         logger.error(f"Error in my_new_tool: {str(e)}")
         return f"Error: {str(e)}"
 ```
 
-## Developing Custom Houdini Integration
+### Key conventions
 
-### Working with Houdini's Python API
+- All data must be JSON-serializable. Convert Houdini types (matrices, colors, etc.) to lists/dicts.
+- Use `try/except Exception:` (never bare `except:`) around all Houdini operations.
+- Return user-friendly error messages from tools.
+- The addon captures stdout from `execute_houdini_code` via `io.StringIO` + `contextlib.redirect_stdout`.
 
-HoudiniMCP uses the Houdini Object Model (HOM) API to interact with Houdini. Key modules include:
+## Project Structure
 
-- `hou`: The main module for Houdini operations
-- `hou.node()`: For accessing nodes in the scene
-- `hou.parm()`: For accessing parameters
-- `hou.geometry()`: For working with geometry
-
-Refer to the [SideFX Houdini Python API documentation](https://www.sidefx.com/docs/houdini/hom/index.html) for complete details.
-
-### Handling Complex Data Types
-
-When passing data between Claude, the MCP server, and Houdini, keep these tips in mind:
-
-1. All data must be JSON-serializable.
-2. For complex Houdini types (like matrices, points, etc.), convert them to lists or dictionaries.
-3. Handle large data volumes carefully to avoid timeout issues.
-
-Example for converting a Houdini transformation matrix:
-
-```python
-def matrix_to_json(matrix):
-    """Convert a hou.Matrix4 to a JSON-serializable format"""
-    return [list(row) for row in matrix.asTupleOfTuples()]
-
-def json_to_matrix(data):
-    """Convert a JSON matrix representation back to hou.Matrix4"""
-    return hou.Matrix4(data)
+```
+houdini-mcp/
+  src/houdini_mcp/
+    __init__.py
+    server.py              # MCP server (FastMCP)
+  houdinimcp_addon.py      # Houdini addon (socket server)
+  install.py               # Houdini auto-start installer
+  pyproject.toml           # Package config
+  houdini/
+    packages/
+      houdinimcp.json      # Houdini package template
+  CLAUDE.md                # AI assistant context
+  README.md                # User-facing docs
+  INSTALLATION.md          # Installation guide
+  DEVELOPERS.md            # This file
 ```
 
-## Error Handling Best Practices
+## Development Workflow
 
-1. Use try/except blocks around all Houdini operations.
-2. Log detailed error information on the server side.
-3. Return user-friendly error messages to the client.
-4. Include context about what was being attempted.
+1. **Edit source files** — changes to `server.py` and `houdinimcp_addon.py` are live immediately if installed with `pip install -e .`
+2. **Restart the MCP server** — close and reopen your MCP client, or restart the stdio process
+3. **Reload the addon** — use the shelf tool "Restart MCP" button, or run in Houdini's Python shell:
+   ```python
+   import importlib, houdinimcp_addon
+   importlib.reload(houdinimcp_addon)
+   houdinimcp_addon.init_houdinimcp()
+   ```
+4. **Test** — ask Claude to use your new tool
 
-Example:
+## Security
 
-```python
-try:
-    # Risky operation
-    result = some_houdini_operation()
-    return {"success": True, "data": result}
-except hou.OperationFailed as e:
-    logger.error(f"Houdini operation failed: {str(e)}")
-    return {"error": f"Couldn't complete the operation: {str(e)}"}
-except Exception as e:
-    logger.error(f"Unexpected error: {str(e)}")
-    traceback.print_exc()
-    return {"error": "An unexpected error occurred"}
-```
-
-## Protocol Extensions
-
-The standard MCP protocol can be extended for Houdini-specific functionality:
-
-1. Add custom attributes in the protocol's context.
-2. Support file uploads/downloads for transferring assets.
-3. Implement custom authentication if needed.
-
-## Testing
-
-1. Create a test suite that verifies each command works as expected.
-2. Test with increasingly complex Houdini scenes.
-3. Test error conditions and edge cases.
-4. Consider using mock objects to test without a running Houdini instance.
-
-Example test script:
-
-```python
-import unittest
-from unittest.mock import MagicMock, patch
-from houdini_mcp.server import get_houdini_connection, create_geometry
-
-class TestHoudiniMCP(unittest.TestCase):
-    @patch('houdini_mcp.server.get_houdini_connection')
-    def test_create_geometry(self, mock_get_connection):
-        # Setup mock
-        mock_connection = MagicMock()
-        mock_connection.send_command.return_value = {
-            "path": "/obj/geo1",
-            "name": "geo1",
-            "type": "box"
-        }
-        mock_get_connection.return_value = mock_connection
-        
-        # Call function
-        result = create_geometry(None, "box", "/obj", "geo1")
-        
-        # Assert command was sent correctly
-        mock_connection.send_command.assert_called_with(
-            "create_geometry", 
-            {"geo_type": "box", "parent_path": "/obj", "name": "geo1"}
-        )
-        
-        # Assert result is formatted correctly
-        self.assertIn("Created box geometry at /obj/geo1", result)
-
-if __name__ == '__main__':
-    unittest.main()
-```
-
-## Contributing
-
-When contributing to this project:
-
-1. Fork the repository and create a feature branch.
-2. Add tests for new functionality.
-3. Ensure all tests pass.
-4. Submit a pull request with a clear description of the changes.
-5. Update documentation to reflect your changes.
-
-For major changes, please open an issue first to discuss what you would like to change.
-
-## Performance Considerations
-
-1. Minimize the number of round-trips between the MCP server and Houdini.
-2. Batch operations when possible.
-3. Be aware that some Houdini operations can be slow (e.g., complex simulations).
-4. Consider implementing progress reporting for long-running operations.
-
-## Security Considerations
-
-1. Avoid exposing the Houdini server to untrusted networks.
-2. Be cautious with the `execute_houdini_code` command, as it can run arbitrary code.
-3. Validate all inputs before passing them to Houdini.
-4. Consider adding authentication to the socket connection if needed.
+- The addon listens only on `localhost` — not exposed to the network.
+- `execute_houdini_code` runs arbitrary Python in Houdini. Powerful but dangerous in untrusted contexts.
+- Validate all inputs before passing to Houdini operations.

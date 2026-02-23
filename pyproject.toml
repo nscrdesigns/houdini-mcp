@@ -14,8 +14,7 @@ classifiers = [
     "Operating System :: OS Independent",
 ]
 dependencies = [
-    # Dependencies needed for the standalone server
-    # Remove the mcp dependency since it's not available
+    "mcp[cli]>=1.3.0",
 ]
 
 [project.scripts]
@@ -29,5 +28,5 @@ build-backend = "setuptools.build_meta"
 package-dir = {"" = "src"}
 
 [project.urls]
-"Homepage" = "https://github.com/yourusername/houdini-mcp"
-"Bug Tracker" = "https://github.com/yourusername/houdini-mcp/issues"
+"Homepage" = "https://github.com/nscrdesigns/houdini-mcp"
+"Bug Tracker" = "https://github.com/nscrdesigns/houdini-mcp/issues"

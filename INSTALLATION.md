@@ -1,145 +1,196 @@
 # HoudiniMCP Installation Guide
 
-This guide provides step-by-step instructions for installing and configuring HoudiniMCP to enable Claude AI to interact with Houdini.
+Step-by-step instructions for installing HoudiniMCP on a new machine.
 
 ## Prerequisites
 
-Before installing HoudiniMCP, make sure you have:
+- **Houdini** 19.0 or newer
+- **Python** 3.9 or newer (with `pip`)
+- **An MCP client**: Claude Code (CLI), Claude Desktop, or Cursor
 
-1. **Houdini** - Version 19.0 or newer
-2. **Python** - Version 3.10 or newer
-3. **Claude for Desktop** or **Cursor** - For accessing Claude AI with MCP support
-4. **uv package manager** - For dependency management
+## Step 1: Clone and install
 
-## Step 1: Install the uv package manager
-
-### On macOS:
 ```bash
-brew install uv
+git clone https://github.com/nscrdesigns/houdini-mcp.git
+cd houdini-mcp
+pip install -e .
 ```
 
-### On Windows:
+This installs the `houdini-mcp` command and the `houdini_mcp` Python package. The `-e` flag makes it editable — source changes take effect immediately without reinstalling.
+
+For a non-editable install (e.g. on a production machine):
 ```bash
-powershell -c "irm https://astral.sh/uv/install.ps1 | iex"
-```
-Then add to your PATH:
-```bash
-set Path=C:\Users\username\.local\bin;%Path%
+pip install .
 ```
 
-### On Linux:
+Verify the install:
 ```bash
-curl -LsSf https://astral.sh/uv/install.sh | sh
+houdini-mcp --help
 ```
 
-## Step 2: Install HoudiniMCP package
+## Step 2: Set up Houdini auto-start
 
-You can install HoudiniMCP using one of these methods:
+Run the installer to configure Houdini to auto-start the addon:
 
-### Option A: Install from GitHub
 ```bash
-pip install git+https://github.com/yourusername/houdini-mcp.git
+python install.py
 ```
 
-### Option B: Install locally
-1. Clone the repository:
-   ```bash
-   git clone https://github.com/yourusername/houdini-mcp.git
-   cd houdini-mcp
-   ```
+This does two things:
+1. **Creates a Houdini package** at `{houdini_prefs}/packages/houdinimcp.json` that sets environment variables (`HOUDINIMCP_ROOT`, `HOUDINIMCP_AUTO_START`)
+2. **Patches `123.py`** in `{houdini_prefs}/scripts/` with an auto-start hook that imports and starts the addon when Houdini launches
 
-2. Install the package:
-   ```bash
-   pip install -e .
-   ```
+The installer auto-detects your Houdini preferences directory (highest version found). Options:
 
-## Step 3: Configure the Houdini Addon
+```bash
+python install.py --houdini-pref-dir "C:\Users\You\Documents\houdini21.0"  # explicit path
+python install.py --dry-run                                                  # preview only
+python install.py --uninstall                                                # remove hook + package
+```
 
-1. Copy the `addon.py` file to your Houdini Python scripts directory:
+### Houdini preferences locations
 
-   - **Windows**: `C:\Users\username\Documents\houdini19.x\scripts\`
-   - **macOS**: `/Users/username/Library/Preferences/houdini/19.x/scripts/`
-   - **Linux**: `~/houdini19.x/scripts/`
+| Platform | Default location |
+|----------|-----------------|
+| Windows  | `C:\Users\<user>\Documents\houdini<version>\` |
+| macOS    | `/Users/<user>/Library/Preferences/houdini/<version>/` |
+| Linux    | `~/houdini<version>/` |
 
-2. Create a startup script to automatically load the addon when Houdini starts.
-   
-   Create a file named `123_houdinimcp.py` in the same scripts directory with the following content:
-   
-   ```python
-   import hou
-   
-   def initializeHoudiniMCP():
-       try:
-           import addon
-           server = addon.init_houdinimcp()
-           if server:
-               print("HoudiniMCP server started successfully")
-       except Exception as e:
-           print(f"Error starting HoudiniMCP: {str(e)}")
-   
-   # Add a slight delay to ensure Houdini is fully loaded
-   hou.ui.addEventLoopCallback(lambda: initializeHoudiniMCP())
-   ```
+You can also set the `HOUDINI_USER_PREF_DIR` environment variable to override.
 
-## Step 4: Configure Claude for Desktop
+## Step 3: Configure your MCP client
 
-1. Open Claude for Desktop
-2. Go to Settings > Developer > Edit Config
-3. Edit the `claude_desktop_config.json` file to include:
+Choose one of the following:
+
+### Claude Code (CLI)
+
+Add to your Claude Code MCP configuration (user-scope `~/.claude.json` or project-scope `.mcp.json`):
 
 ```json
 {
-    "mcpServers": {
-        "houdini": {
-            "command": "uvx",
-            "args": [
-                "houdini-mcp"
-            ]
-        }
+  "mcpServers": {
+    "houdini": {
+      "type": "stdio",
+      "command": "houdini-mcp"
     }
+  }
 }
 ```
 
-4. Save the file and restart Claude for Desktop
+If `houdini-mcp` is not on your PATH, use the full path to the executable:
+```json
+{
+  "mcpServers": {
+    "houdini": {
+      "type": "stdio",
+      "command": "C:/Users/You/AppData/Local/Programs/Python/Python312/Scripts/houdini-mcp.exe"
+    }
+  }
+}
+```
 
-## Step 5: Configure Cursor (Alternative to Claude for Desktop)
+### Claude Desktop
 
-If you're using Cursor instead of Claude for Desktop:
+Go to Claude > Settings > Developer > Edit Config. Edit `claude_desktop_config.json`:
 
-1. Go to Cursor Settings > MCP
-2. Add a new command:
-   ```bash
-   uvx houdini-mcp
+```json
+{
+  "mcpServers": {
+    "houdini": {
+      "command": "houdini-mcp"
+    }
+  }
+}
+```
+
+Save and restart Claude Desktop.
+
+### Cursor
+
+Go to Cursor Settings > MCP and add the command:
+```
+houdini-mcp
+```
+
+> Only run one MCP client at a time connected to Houdini — not multiple simultaneously.
+
+## Step 4: Test the connection
+
+1. **Start Houdini**. You should see in the console:
+   ```
+   [HoudiniMCP] Server started on localhost:9877
+   ```
+   If you don't see this, the auto-start may not be configured. See [Troubleshooting](#troubleshooting).
+
+2. **Open your MCP client** (Claude Code, Claude Desktop, or Cursor).
+
+3. **Ask Claude to interact with Houdini**:
+   ```
+   Get the current Houdini scene info
+   ```
+   If the connection is working, Claude will return information about your Houdini scene.
+
+## Running Multiple Houdini Instances
+
+Each Houdini instance automatically binds to the next available port (9877-9886). The MCP server auto-discovers all running instances and connects to the most recent one.
+
+Use these tools to manage instances:
+- `list_houdini_instances` — see all running Houdini sessions
+- `connect_to_houdini` — switch to a specific instance by port number
+
+## Manual Start (without auto-start)
+
+If you skip Step 2, you can start the addon manually each session:
+
+1. In Houdini's Python Shell, run:
+   ```python
+   import sys
+   sys.path.insert(0, r"D:\Coding\houdini-mcp")  # adjust to your repo path
+   import houdinimcp_addon
+   server = houdinimcp_addon.init_houdinimcp()
    ```
 
-## Step 6: Testing the Connection
+2. Or use the shelf tool if you've copied `houdini/toolbar/houdinimcp.shelf` to your Houdini toolbar directory.
 
-1. Start Houdini
-2. Verify that you see a message in the console: "HoudiniMCP server started on localhost:9877"
-3. Open Claude for Desktop or Cursor
-4. Ask Claude to interact with Houdini by trying a simple command:
-   ```
-   Use Houdini to create a sphere in the scene
-   ```
+## Uninstalling
 
-If everything is set up correctly, Claude should be able to create a sphere in Houdini.
+Remove the Houdini auto-start hook and package:
+```bash
+python install.py --uninstall
+```
+
+Uninstall the Python package:
+```bash
+pip uninstall houdini-mcp
+```
 
 ## Troubleshooting
 
-### Connection Issues
+### Addon doesn't auto-start
 
-- **Server not starting**: Check if the port 9877 is already in use by another application
-- **Claude can't connect**: Make sure the MCP server is running and the configuration in Claude is correct
-- **Timeout errors**: Try simpler commands first to verify basic connectivity
+1. Verify the package file exists:
+   - Windows: `C:\Users\<user>\Documents\houdini<ver>\packages\houdinimcp.json`
+2. Verify the 123.py hook exists:
+   - Windows: `C:\Users\<user>\Documents\houdini<ver>\scripts\123.py`
+   - Look for the `# --- HoudiniMCP auto-start hook ---` marker
+3. Re-run `python install.py` to reinstall
 
-### Permission Issues
+### "Module not found" errors
 
-- **File access errors**: Ensure Houdini has permissions to write to temporary directories
-- **Addon loading errors**: Check that the addon.py file is in the correct directory
+- Make sure you ran `pip install -e .` in the houdini-mcp directory
+- Verify `houdini-mcp` is accessible: `houdini-mcp --help`
+- If using a virtual environment, ensure it's activated
 
-### Python Version Conflicts
+### Connection refused
 
-- **Module import errors**: Make sure the Python version used by HoudiniMCP matches the one used by Houdini
-- **Dependency issues**: Try installing dependencies manually: `pip install mcp[cli]>=1.3.0`
+- Check the Houdini console for the addon's startup message and port number
+- The addon only listens on `localhost` — verify you're connecting from the same machine
+- If port 9877 is in use, the addon tries ports up to 9886. The MCP server discovers the active port automatically.
 
-For additional help, check the [README.md](README.md) file or submit an issue on GitHub.
+### Port conflicts
+
+If another application uses port 9877, the addon automatically binds to the next available port. No configuration needed. Use `list_houdini_instances` to see which port is active.
+
+### Python version mismatch
+
+The MCP server runs in your system Python (3.9+). The Houdini addon runs inside Houdini's embedded Python. These don't need to match — they communicate over TCP.

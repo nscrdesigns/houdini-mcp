@@ -4,33 +4,149 @@ import socket
 import threading
 import time
 import traceback
+import math
+import io
+import contextlib
+import os
+import sys
+import platform
+from datetime import datetime, timezone
 from typing import Dict, Any, Optional, Tuple, List
 
+def _get_port_file_dir():
+    """Get the platform-appropriate directory for port files."""
+    if sys.platform == 'win32':
+        base = os.environ.get('LOCALAPPDATA', os.path.expanduser('~'))
+        return os.path.join(base, 'HoudiniMCP', 'instances')
+    else:
+        base = os.environ.get('XDG_DATA_HOME', os.path.join(os.path.expanduser('~'), '.local', 'share'))
+        return os.path.join(base, 'houdinimcp', 'instances')
+
+
+def _is_pid_alive(pid):
+    """Check if a process with the given PID is still running."""
+    if sys.platform == 'win32':
+        try:
+            import ctypes
+            PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+            handle = ctypes.windll.kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+            if handle:
+                ctypes.windll.kernel32.CloseHandle(handle)
+                return True
+            return False
+        except Exception:
+            return False
+    else:
+        try:
+            os.kill(pid, 0)
+            return True
+        except (OSError, ProcessLookupError):
+            return False
+
+
 class HoudiniMCPServer:
-    def __init__(self, host='localhost', port=9877):
+    DEFAULT_PORT_RANGE = (9877, 9886)
+
+    def __init__(self, host='localhost', port=None, port_range=None):
         self.host = host
-        self.port = port
+        self.port = port  # None means auto-detect from range
+        self.port_range = port_range or self.DEFAULT_PORT_RANGE
         self.running = False
         self.socket = None
         self.client = None
         self.buffer = b''  # Buffer for incomplete data
         self.thread = None
+        self._port_file_path = None
     
+    def _clean_stale_port_files(self):
+        """Remove port files for processes that are no longer running."""
+        port_dir = _get_port_file_dir()
+        if not os.path.isdir(port_dir):
+            return
+        for fname in os.listdir(port_dir):
+            if not fname.startswith('houdini_') or not fname.endswith('.json'):
+                continue
+            fpath = os.path.join(port_dir, fname)
+            try:
+                with open(fpath, 'r') as f:
+                    info = json.load(f)
+                pid = info.get('pid')
+                if pid and not _is_pid_alive(pid):
+                    os.remove(fpath)
+                    print(f"[HoudiniMCP] Cleaned stale port file: {fname}")
+            except Exception:
+                pass
+
+    def _write_port_file(self):
+        """Write a port file advertising this instance."""
+        port_dir = _get_port_file_dir()
+        os.makedirs(port_dir, exist_ok=True)
+
+        info = {
+            'port': self.port,
+            'pid': os.getpid(),
+            'hip_file': hou.hipFile.path(),
+            'hip_name': hou.hipFile.basename(),
+            'houdini_version': hou.applicationVersionString(),
+            'started_at': datetime.now(timezone.utc).isoformat(),
+            'hostname': self.host,
+        }
+
+        port_file = os.path.join(port_dir, f'houdini_{self.port}.json')
+        tmp_file = port_file + '.tmp'
+        with open(tmp_file, 'w') as f:
+            json.dump(info, f, indent=2)
+        os.replace(tmp_file, port_file)
+        self._port_file_path = port_file
+        print(f"[HoudiniMCP] Port file written: {port_file}")
+
+    def _remove_port_file(self):
+        """Remove this instance's port file."""
+        if self._port_file_path:
+            try:
+                os.remove(self._port_file_path)
+                print(f"[HoudiniMCP] Port file removed: {self._port_file_path}")
+            except Exception:
+                pass
+            self._port_file_path = None
+
     def start(self):
         """Start the Houdini MCP server"""
+        self._clean_stale_port_files()
         self.running = True
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        
+
         try:
-            self.socket.bind((self.host, self.port))
+            if self.port is not None:
+                # Explicit port — try only that one
+                self.socket.bind((self.host, self.port))
+            else:
+                # Auto-detect: try each port in the range
+                bound = False
+                for p in range(self.port_range[0], self.port_range[1] + 1):
+                    try:
+                        self.socket.bind((self.host, p))
+                        self.port = p
+                        bound = True
+                        break
+                    except OSError:
+                        continue
+                if not bound:
+                    raise OSError(
+                        f"All ports in range {self.port_range[0]}-{self.port_range[1]} are in use"
+                    )
+
             self.socket.listen(1)
-            
+
+            # Write port file so the MCP server can discover us
+            self._write_port_file()
+
             # Start server in a separate thread
             self.thread = threading.Thread(target=self._run_server)
             self.thread.daemon = True
             self.thread.start()
-            
+
             print(f"HoudiniMCP server started on {self.host}:{self.port}")
             return True
         except Exception as e:
@@ -40,17 +156,18 @@ class HoudiniMCPServer:
             
     def stop(self):
         """Stop the Houdini MCP server"""
+        self._remove_port_file()
         self.running = False
-        
+
         if self.thread:
             self.thread.join(timeout=1.0)
             self.thread = None
-            
+
         if self.socket:
             self.socket.close()
         if self.client:
             self.client.close()
-            
+
         self.socket = None
         self.client = None
         print("HoudiniMCP server stopped")
@@ -148,6 +265,8 @@ class HoudiniMCPServer:
                 "export_abc": self.export_abc,
                 "export_usd": self.export_usd,
                 "render_scene": self.render_scene,
+                "screenshot_viewport": self.screenshot_viewport,
+                "render_cop": self.render_cop,
             }
             
             handler = handlers.get(cmd_type)
@@ -175,9 +294,9 @@ class HoudiniMCPServer:
             scene_info = {
                 "hip_file": hou.hipFile.path(),
                 "name": hou.hipFile.basename(),
-                "modified": hou.hipFile.isModified(),
+                "modified": hou.hipFile.hasUnsavedChanges(),
                 "fps": hou.fps(),
-                "frame_range": [hou.playbar.frameRange()],
+                "frame_range": list(hou.playbar.frameRange()),
                 "current_frame": hou.frame(),
                 "node_count": len(hou.node("/").allSubChildren()),
                 "top_level_nodes": []
@@ -206,27 +325,62 @@ class HoudiniMCPServer:
             if not node:
                 raise ValueError(f"Node not found: {path}")
             
-            # Basic node info
+            # Basic node info - use try/except for methods that may not exist on all node types
             node_info = {
                 "name": node.name(),
                 "type": node.type().name(),
                 "category": node.type().category().name(),
                 "path": node.path(),
-                "is_bypassed": node.isBypassed(),
-                "is_displayed": node.isDisplayFlagSet(),
-                "is_render_flagged": node.isRenderFlagSet(),
-                "is_selectable": node.isSelectableInViewport(), 
                 "position": [node.position()[0], node.position()[1]],
-                "color": list(node.color()) if node.color() else None,
-                "has_errors": node.errors() != "",
-                "errors": node.errors(),
                 "child_count": len(node.children()),
                 "children": [child.name() for child in node.children()],
                 "parameter_count": len(node.parms()),
                 "parameters": {},
-                "inputs": [input_node.path() if input_node else None for input_node in node.inputs()],
-                "outputs": [output_node.path() if output_node else None for output_node in node.outputs()],
             }
+
+            # Add optional flags that may not exist on all node types
+            try:
+                node_info["is_bypassed"] = node.isBypassed()
+            except AttributeError:
+                node_info["is_bypassed"] = None
+
+            try:
+                node_info["is_displayed"] = node.isDisplayFlagSet()
+            except AttributeError:
+                node_info["is_displayed"] = None
+
+            try:
+                node_info["is_render_flagged"] = node.isRenderFlagSet()
+            except AttributeError:
+                node_info["is_render_flagged"] = None
+
+            try:
+                node_info["is_selectable"] = node.isSelectableInViewport()
+            except AttributeError:
+                node_info["is_selectable"] = None
+
+            try:
+                node_info["color"] = list(node.color().rgb())
+            except Exception:
+                node_info["color"] = None
+
+            try:
+                errs = node.errors()
+                node_info["has_errors"] = len(errs) > 0
+                node_info["errors"] = list(errs)
+            except Exception:
+                node_info["has_errors"] = False
+                node_info["errors"] = []
+
+            try:
+                node_info["inputs"] = [input_node.path() if input_node else None for input_node in node.inputs()]
+            except Exception:
+                node_info["inputs"] = []
+
+            try:
+                node_info["outputs"] = [output_node.path() if output_node else None for output_node in node.outputs()]
+            except Exception:
+                node_info["outputs"] = []
             
             # Add parameter info (limit to avoid overwhelming response)
             for i, parm in enumerate(node.parms()):
@@ -259,7 +413,7 @@ class HoudiniMCPServer:
         """Helper to get parameter value in a JSON-serializable format"""
         try:
             parm_type = parm.parmTemplate().type()
-            
+
             if parm_type == hou.parmTemplateType.Float:
                 return parm.eval()
             elif parm_type == hou.parmTemplateType.Int:
@@ -270,16 +424,10 @@ class HoudiniMCPServer:
                 return bool(parm.eval())
             elif parm_type == hou.parmTemplateType.Menu:
                 return parm.eval()
-            elif parm_type == hou.parmTemplateType.FloatVector:
-                return list(parm.eval())
-            elif parm_type == hou.parmTemplateType.IntVector:
-                return list(parm.eval())
-            elif parm_type == hou.parmTemplateType.Color:
-                return list(parm.eval())
             else:
                 # For complex types, convert to string
                 return str(parm.eval())
-        except:
+        except Exception:
             return "error getting value"
     
     def create_node(self, 
@@ -338,9 +486,7 @@ class HoudiniMCPServer:
                 node.setPosition((position[0], position[1]))
                 
             if color and len(color) >= 3:
-                # Convert RGB to Houdini color
-                alpha = 1.0 if len(color) < 4 else color[3]
-                node.setColor(hou.Color((color[0], color[1], color[2], alpha)))
+                node.setColor(hou.Color((color[0], color[1], color[2])))
                 
             if name:
                 node.setName(name)
@@ -357,7 +503,7 @@ class HoudiniMCPServer:
                 "path": node.path(),
                 "name": node.name(),
                 "position": [node.position()[0], node.position()[1]],
-                "color": list(node.color()) if node.color() else None,
+                "color": list(node.color().rgb()),
                 "is_bypassed": node.isBypassed(),
                 "is_displayed": node.isDisplayFlagSet()
             }
@@ -390,12 +536,29 @@ class HoudiniMCPServer:
             return {"error": str(e)}
     
     def execute_code(self, code: str) -> Dict[str, Any]:
-        """Execute arbitrary Python code in Houdini"""
+        """Execute arbitrary Python code in Houdini with stdout capture"""
         try:
             # Create a local namespace for execution
             namespace = {"hou": hou}
-            exec(code, namespace)
-            return {"executed": True}
+
+            # Capture stdout from print statements
+            stdout_capture = io.StringIO()
+            with contextlib.redirect_stdout(stdout_capture):
+                exec(code, namespace)
+
+            output = stdout_capture.getvalue()
+            result_value = namespace.get("__result__")
+
+            response = {"executed": True}
+            if output:
+                response["output"] = output
+            if result_value is not None:
+                try:
+                    json.dumps(result_value)  # test serializability
+                    response["result"] = result_value
+                except (TypeError, ValueError):
+                    response["result"] = str(result_value)
+            return response
         except Exception as e:
             print(f"Error in execute_code: {str(e)}")
             traceback.print_exc()
@@ -899,7 +1062,7 @@ class HoudiniMCPServer:
                     
                     # Set rotation parameters
                     camera.parmTuple("r").set(rotation)
-                except:
+                except Exception:
                     # If look-at calculation fails, just set the look_at parameter if available
                     look_at_parm = camera.parmTuple("lookat")
                     if look_at_parm:
@@ -1159,44 +1322,47 @@ class HoudiniMCPServer:
             traceback.print_exc()
             return {"error": str(e)}
     
-    def export_fbx(self, 
+    def export_fbx(self,
                   node_path: str,
                   file_path: Optional[str] = None,
                   animation: bool = False) -> Dict[str, Any]:
-        """Export a node to FBX format"""
+        """Export a node to FBX format using a filmboxfbx ROP"""
         try:
             node = hou.node(node_path)
             if not node:
                 raise ValueError(f"Node not found: {node_path}")
-            
+
             # Generate file path if not provided
             if not file_path:
                 temp_dir = hou.expandString("$TEMP")
                 file_path = f"{temp_dir}/{node.name()}.fbx"
-            
+
             # Ensure the path has an fbx extension
             if not file_path.endswith(".fbx"):
                 file_path += ".fbx"
-            
-            # Export the node
+
+            # Create a temporary filmboxfbx ROP (same pattern as export_abc/export_usd)
+            rop = hou.node("/out") or hou.node("/").createNode("out")
+            fbx_rop = rop.createNode("filmboxfbx")
+
+            # Configure the ROP
+            fbx_rop.parm("sopoutput").set(file_path)
+            fbx_rop.parm("startnode").set(node_path)
+
             if animation:
-                # Export with animation in frame range
                 frame_range = hou.playbar.frameRange()
-                hou.hipFile.exportFBX(
-                    file_path,
-                    [node],
-                    start_frame=frame_range[0],
-                    end_frame=frame_range[1],
-                    use_obj_transform=True
-                )
+                fbx_rop.parm("trange").set(1)
+                fbx_rop.parm("f1").set(frame_range[0])
+                fbx_rop.parm("f2").set(frame_range[1])
             else:
-                # Export static model
-                hou.hipFile.exportFBX(
-                    file_path,
-                    [node],
-                    use_obj_transform=True
-                )
-            
+                fbx_rop.parm("trange").set(0)
+
+            # Execute the ROP
+            fbx_rop.parm("execute").pressButton()
+
+            # Clean up
+            fbx_rop.destroy()
+
             return {
                 "success": True,
                 "node": node_path,
@@ -1395,6 +1561,131 @@ class HoudiniMCPServer:
             }
         except Exception as e:
             print(f"Error in render_scene: {str(e)}")
+            traceback.print_exc()
+            return {"error": str(e)}
+
+    def screenshot_viewport(self,
+                           output_path: Optional[str] = None,
+                           viewer: str = "desktop") -> Dict[str, Any]:
+        """Take a screenshot of the current viewport"""
+        try:
+            # Generate output path if not provided
+            if not output_path:
+                temp_dir = hou.expandString("$HIP")
+                output_path = f"{temp_dir}/mcp_viewport_screenshot.png"
+
+            # Ensure the path has an image extension
+            if not any(output_path.endswith(ext) for ext in [".png", ".jpg", ".jpeg"]):
+                output_path += ".png"
+
+            # Get the scene viewer
+            desktop = hou.ui.curDesktop()
+            scene_viewer = None
+
+            # Try to find a scene viewer
+            for pane in desktop.panes():
+                for tab in pane.tabs():
+                    if tab.type() == hou.paneTabType.SceneViewer:
+                        scene_viewer = tab
+                        break
+                if scene_viewer:
+                    break
+
+            if scene_viewer:
+                # Use flipbook snapshot for scene viewer
+                # Must stash() to get a mutable copy of settings
+                flipbook_settings = scene_viewer.flipbookSettings().stash()
+                flipbook_settings.output(output_path)
+                flipbook_settings.outputToMPlay(False)
+                flipbook_settings.frameRange((hou.frame(), hou.frame()))
+                scene_viewer.flipbook(scene_viewer.curViewport(), settings=flipbook_settings)
+
+                return {
+                    "success": True,
+                    "file_path": output_path,
+                    "viewer_type": "scene",
+                    "frame": hou.frame()
+                }
+            else:
+                # Try to find a COP viewer
+                for pane in desktop.panes():
+                    for tab in pane.tabs():
+                        if tab.type() == hou.paneTabType.CompositorViewer:
+                            # Found a COP viewer - get its displayed node
+                            cop_viewer = tab
+                            # COP viewers don't have direct screenshot, but we can get the displayed node
+                            return {
+                                "success": False,
+                                "error": "COP viewer found but direct screenshot not supported. Use render_cop instead.",
+                                "viewer_type": "compositor"
+                            }
+
+                return {
+                    "success": False,
+                    "error": "No suitable viewer found"
+                }
+
+        except Exception as e:
+            print(f"Error in screenshot_viewport: {str(e)}")
+            traceback.print_exc()
+            return {"error": str(e)}
+
+    def render_cop(self,
+                   node_path: str,
+                   output_path: Optional[str] = None,
+                   frame: Optional[int] = None) -> Dict[str, Any]:
+        """Render a COP node output to an image file.
+
+        Tries Copernicus node.saveImage() first (H20.5+), falls back to
+        a Composite ROP for legacy COP2 networks.
+        """
+        try:
+            node = hou.node(node_path)
+            if not node:
+                raise ValueError(f"Node not found: {node_path}")
+
+            if not output_path:
+                hip_dir = hou.expandString("$HIP")
+                output_path = f"{hip_dir}/mcp_cop_render.png"
+
+            if not any(output_path.endswith(ext) for ext in [".png", ".jpg", ".jpeg", ".exr", ".tif", ".tiff"]):
+                output_path += ".png"
+
+            if frame is not None:
+                hou.setFrame(frame)
+
+            # Try Copernicus saveImage (H20.5+ / Copernicus COP nodes)
+            if hasattr(node, "saveImage"):
+                try:
+                    node.saveImage(output_path)
+                    return {
+                        "success": True,
+                        "file_path": output_path,
+                        "method": "copernicus_saveImage",
+                        "frame": hou.frame()
+                    }
+                except Exception:
+                    pass  # fall through to ROP method
+
+            # Fallback: use a Composite ROP for COP2 networks
+            rop = hou.node("/out") or hou.node("/").createNode("out")
+            comp_rop = rop.createNode("comp")
+
+            comp_rop.parm("coppath").set(node_path)
+            comp_rop.parm("copoutput").set(output_path)
+            comp_rop.parm("trange").set(0)  # current frame
+
+            comp_rop.parm("execute").pressButton()
+            comp_rop.destroy()
+
+            return {
+                "success": True,
+                "file_path": output_path,
+                "method": "composite_rop",
+                "frame": hou.frame()
+            }
+        except Exception as e:
+            print(f"Error in render_cop: {str(e)}")
             traceback.print_exc()
             return {"error": str(e)}
 

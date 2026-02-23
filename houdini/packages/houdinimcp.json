@@ -1,0 +1,6 @@
+{
+    "env": [
+        {"HOUDINIMCP_ROOT": "REPLACE_WITH_REPO_PATH"},
+        {"HOUDINIMCP_AUTO_START": "1"}
+    ]
+}
