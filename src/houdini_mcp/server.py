@@ -1222,17 +1222,17 @@ def render_cop(
     node_path: str,
     output_path: Optional[str] = None,
     frame: Optional[int] = None
-) -> str:
+) -> list:
     """
     Render a COP (compositing) node output to an image file.
 
     Parameters:
     - node_path: Path to the COP node to render
-    - output_path: Optional path to save the image (default: $HIP/mcp_cop_render.png)
+    - output_path: Optional path to save the image (default: auto temp file, cleaned up after viewing)
     - frame: Optional frame number to render (default: current frame)
 
     Returns:
-    Information about the rendered image including file path.
+    The rendered image along with render info.
     """
     try:
         houdini = get_houdini_connection()
@@ -1249,10 +1249,29 @@ def render_cop(
         if "error" in result:
             return f"Error rendering COP: {result['error']}"
 
-        msg = f"Rendered COP node {node_path}"
-        if "file_path" in result:
-            msg += f"\nSaved to: {result['file_path']}"
-        return msg
+        file_path = result.get("file_path", "")
+        is_temp = result.get("is_temp", False)
+
+        parts = [f"Rendered COP node: {node_path}"]
+        if result.get("method"):
+            parts.append(f"Method: {result['method']}")
+        parts.append(f"Frame: {result.get('frame', '?')}")
+        if not is_temp:
+            parts.append(f"Saved to: {file_path}")
+
+        msg = " | ".join(parts)
+
+        response = []
+        if os.path.exists(file_path):
+            response.append(Image(path=file_path))
+            if is_temp:
+                try:
+                    os.remove(file_path)
+                except OSError:
+                    pass
+        response.append(msg)
+        return response
+
     except Exception as e:
         logger.error(f"Error rendering COP: {str(e)}")
         return f"Error rendering COP: {str(e)}"
@@ -1358,16 +1377,19 @@ def connect_to_houdini(ctx: Context, port: int) -> str:
 @mcp.tool()
 def screenshot_viewport(
     ctx: Context,
-    output_path: Optional[str] = None
-) -> str:
+    output_path: Optional[str] = None,
+    viewer_name: Optional[str] = None
+) -> list:
     """
     Take a screenshot of the current Houdini viewport.
 
     Parameters:
-    - output_path: Optional path to save the screenshot (default: $HIP/mcp_viewport_screenshot.png)
+    - output_path: Optional path to save the screenshot (default: auto temp file, cleaned up after viewing)
+    - viewer_name: Optional viewer tab name to capture (default: first scene viewer found)
 
     Returns:
-    Information about the screenshot including file path.
+    The screenshot image along with viewer context info (viewer name, viewport type,
+    displayed node, network path, camera).
     """
     try:
         houdini = get_houdini_connection()
@@ -1375,17 +1397,52 @@ def screenshot_viewport(
         params = {}
         if output_path:
             params["output_path"] = output_path
+        if viewer_name:
+            params["viewer_name"] = viewer_name
 
         result = houdini.send_command("screenshot_viewport", params)
 
         if "error" in result:
             return f"Error taking screenshot: {result['error']}"
 
-        if result.get("success"):
-            msg = f"Screenshot saved to: {result.get('file_path', 'unknown')}"
-            return msg
-        else:
+        if not result.get("success"):
             return f"Screenshot failed: {result.get('error', 'unknown error')}"
+
+        file_path = result.get("file_path", "")
+        is_temp = result.get("is_temp", False)
+
+        # Build viewer context summary
+        viewer = result.get("viewer", {})
+        parts = []
+        if viewer.get("tab_name"):
+            parts.append(f"Viewer: {viewer['tab_name']}")
+        if viewer.get("viewport_type"):
+            parts.append(f"Viewport: {viewer['viewport_type']}")
+        if viewer.get("displayed_node"):
+            parts.append(f"Displayed node: {viewer['displayed_node']}")
+        if viewer.get("network_path"):
+            parts.append(f"Network: {viewer['network_path']}")
+        if viewer.get("camera"):
+            parts.append(f"Camera: {viewer['camera']}")
+        parts.append(f"Frame: {result.get('frame', '?')}")
+        if not is_temp:
+            parts.append(f"Saved to: {file_path}")
+
+        context_msg = " | ".join(parts)
+
+        # Return image inline + context, then clean up temp file
+        response = []
+        if os.path.exists(file_path):
+            response.append(Image(path=file_path))
+            # Auto-cleanup temp files after reading
+            if is_temp:
+                try:
+                    os.remove(file_path)
+                except OSError:
+                    pass  # best-effort cleanup
+        response.append(context_msg)
+        return response
+
     except Exception as e:
         logger.error(f"Error taking screenshot: {str(e)}")
         return f"Error taking screenshot: {str(e)}"

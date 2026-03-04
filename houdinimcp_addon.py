@@ -10,6 +10,7 @@ import contextlib
 import os
 import sys
 import platform
+import tempfile
 from datetime import datetime, timezone
 from typing import Dict, Any, Optional, Tuple, List
 
@@ -1564,65 +1565,145 @@ class HoudiniMCPServer:
             traceback.print_exc()
             return {"error": str(e)}
 
+    def _get_viewer_info(self, tab) -> Dict[str, Any]:
+        """Extract detailed info from a viewer pane tab."""
+        info = {
+            "tab_name": tab.name(),
+            "tab_type": str(tab.type()),
+        }
+
+        if tab.type() == hou.paneTabType.SceneViewer:
+            info["viewer_type"] = "scene"
+            try:
+                vp = tab.curViewport()
+                info["viewport_name"] = vp.name()
+                # Viewport type: perspective, top, front, right, bottom, back, left, UV
+                info["viewport_type"] = str(vp.type()).replace("hou.geometryViewportType.", "")
+                # Camera if one is set
+                cam = vp.camera()
+                if cam:
+                    info["camera"] = cam.path()
+            except Exception:
+                pass
+            # Current network path the viewer is looking at
+            try:
+                pwd = tab.pwd()
+                if pwd:
+                    info["network_path"] = pwd.path()
+            except Exception:
+                pass
+            # Current displayed SOP node
+            try:
+                cur_node = tab.currentNode()
+                if cur_node:
+                    info["displayed_node"] = cur_node.path()
+            except Exception:
+                pass
+
+        elif tab.type() == hou.paneTabType.CompositorViewer:
+            info["viewer_type"] = "compositor"
+            try:
+                cur_node = tab.currentNode()
+                if cur_node:
+                    info["displayed_node"] = cur_node.path()
+            except Exception:
+                pass
+
+        return info
+
+    def _find_viewer(self, viewer_name: Optional[str] = None):
+        """Find a viewer tab, optionally by name. Returns (tab, pane) or (None, None)."""
+        desktop = hou.ui.curDesktop()
+        scene_viewers = []
+        cop_viewers = []
+
+        for pane in desktop.panes():
+            for tab in pane.tabs():
+                if tab.type() == hou.paneTabType.SceneViewer:
+                    scene_viewers.append((tab, pane))
+                elif tab.type() == hou.paneTabType.CompositorViewer:
+                    cop_viewers.append((tab, pane))
+
+        all_viewers = scene_viewers + cop_viewers
+
+        # If a name was given, match by tab name
+        if viewer_name:
+            for tab, pane in all_viewers:
+                if tab.name() == viewer_name:
+                    return tab, pane
+            return None, None
+
+        # Default: first scene viewer, then first COP viewer
+        if scene_viewers:
+            return scene_viewers[0]
+        if cop_viewers:
+            return cop_viewers[0]
+        return None, None
+
     def screenshot_viewport(self,
                            output_path: Optional[str] = None,
-                           viewer: str = "desktop") -> Dict[str, Any]:
-        """Take a screenshot of the current viewport"""
+                           viewer_name: Optional[str] = None) -> Dict[str, Any]:
+        """Take a screenshot of the current viewport with panel awareness."""
         try:
-            # Generate output path if not provided
-            if not output_path:
-                temp_dir = hou.expandString("$HIP")
-                output_path = f"{temp_dir}/mcp_viewport_screenshot.png"
+            # Determine if this is a temp file (auto-cleanup candidate)
+            is_temp = output_path is None
+            if is_temp:
+                fd, output_path = tempfile.mkstemp(suffix=".png", prefix="houdini_mcp_screenshot_")
+                os.close(fd)  # close fd, flipbook will write to the path
+            else:
+                # Ensure the path has an image extension
+                if not any(output_path.endswith(ext) for ext in [".png", ".jpg", ".jpeg"]):
+                    output_path += ".png"
 
-            # Ensure the path has an image extension
-            if not any(output_path.endswith(ext) for ext in [".png", ".jpg", ".jpeg"]):
-                output_path += ".png"
+            # Find the viewer
+            tab, pane = self._find_viewer(viewer_name)
 
-            # Get the scene viewer
-            desktop = hou.ui.curDesktop()
-            scene_viewer = None
+            if tab is None:
+                # Clean up temp file since we won't use it
+                if is_temp and os.path.exists(output_path):
+                    os.remove(output_path)
+                return {
+                    "success": False,
+                    "error": "No suitable viewer found" + (
+                        f" matching name '{viewer_name}'" if viewer_name else ""
+                    )
+                }
 
-            # Try to find a scene viewer
-            for pane in desktop.panes():
-                for tab in pane.tabs():
-                    if tab.type() == hou.paneTabType.SceneViewer:
-                        scene_viewer = tab
-                        break
-                if scene_viewer:
-                    break
+            viewer_info = self._get_viewer_info(tab)
 
-            if scene_viewer:
+            if tab.type() == hou.paneTabType.SceneViewer:
                 # Use flipbook snapshot for scene viewer
-                # Must stash() to get a mutable copy of settings
-                flipbook_settings = scene_viewer.flipbookSettings().stash()
+                flipbook_settings = tab.flipbookSettings().stash()
                 flipbook_settings.output(output_path)
                 flipbook_settings.outputToMPlay(False)
                 flipbook_settings.frameRange((hou.frame(), hou.frame()))
-                scene_viewer.flipbook(scene_viewer.curViewport(), settings=flipbook_settings)
+                tab.flipbook(tab.curViewport(), settings=flipbook_settings)
 
                 return {
                     "success": True,
                     "file_path": output_path,
-                    "viewer_type": "scene",
-                    "frame": hou.frame()
+                    "is_temp": is_temp,
+                    "frame": hou.frame(),
+                    "viewer": viewer_info,
                 }
-            else:
-                # Try to find a COP viewer
-                for pane in desktop.panes():
-                    for tab in pane.tabs():
-                        if tab.type() == hou.paneTabType.CompositorViewer:
-                            # Found a COP viewer - get its displayed node
-                            cop_viewer = tab
-                            # COP viewers don't have direct screenshot, but we can get the displayed node
-                            return {
-                                "success": False,
-                                "error": "COP viewer found but direct screenshot not supported. Use render_cop instead.",
-                                "viewer_type": "compositor"
-                            }
 
+            elif tab.type() == hou.paneTabType.CompositorViewer:
+                # Clean up temp file since we can't use it
+                if is_temp and os.path.exists(output_path):
+                    os.remove(output_path)
                 return {
                     "success": False,
-                    "error": "No suitable viewer found"
+                    "error": "COP viewer found but direct screenshot not supported. Use render_cop instead.",
+                    "viewer": viewer_info,
+                }
+
+            else:
+                if is_temp and os.path.exists(output_path):
+                    os.remove(output_path)
+                return {
+                    "success": False,
+                    "error": f"Unsupported viewer type: {viewer_info.get('viewer_type', 'unknown')}",
+                    "viewer": viewer_info,
                 }
 
         except Exception as e:
@@ -1644,12 +1725,13 @@ class HoudiniMCPServer:
             if not node:
                 raise ValueError(f"Node not found: {node_path}")
 
-            if not output_path:
-                hip_dir = hou.expandString("$HIP")
-                output_path = f"{hip_dir}/mcp_cop_render.png"
-
-            if not any(output_path.endswith(ext) for ext in [".png", ".jpg", ".jpeg", ".exr", ".tif", ".tiff"]):
-                output_path += ".png"
+            is_temp = output_path is None
+            if is_temp:
+                fd, output_path = tempfile.mkstemp(suffix=".png", prefix="houdini_mcp_cop_")
+                os.close(fd)
+            else:
+                if not any(output_path.endswith(ext) for ext in [".png", ".jpg", ".jpeg", ".exr", ".tif", ".tiff"]):
+                    output_path += ".png"
 
             if frame is not None:
                 hou.setFrame(frame)
@@ -1661,6 +1743,7 @@ class HoudiniMCPServer:
                     return {
                         "success": True,
                         "file_path": output_path,
+                        "is_temp": is_temp,
                         "method": "copernicus_saveImage",
                         "frame": hou.frame()
                     }
@@ -1681,6 +1764,7 @@ class HoudiniMCPServer:
             return {
                 "success": True,
                 "file_path": output_path,
+                "is_temp": is_temp,
                 "method": "composite_rop",
                 "frame": hou.frame()
             }
