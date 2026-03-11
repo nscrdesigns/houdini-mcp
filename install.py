@@ -5,7 +5,7 @@ HoudiniMCP installer — sets up auto-start for the Houdini addon.
 Usage:
     python install.py                      # install (auto-detect Houdini prefs)
     python install.py --houdini-pref-dir DIR  # install with explicit prefs path
-    python install.py --uninstall          # remove package + 123.py hook
+    python install.py --uninstall          # remove package + startup hooks
     python install.py --dry-run            # show what would be done without writing
 """
 
@@ -93,14 +93,14 @@ def write_package(pref_dir, repo_root, dry_run=False):
     print(f"[OK] Package written: {pkg_path}")
 
 
-def patch_123(pref_dir, dry_run=False):
-    """Add the auto-start hook to 123.py (idempotent)."""
+def patch_startup_script(pref_dir, script_name, dry_run=False):
+    """Add the auto-start hook to a Houdini startup script (idempotent)."""
     scripts_dir = os.path.join(pref_dir, "scripts")
-    py123_path = os.path.join(scripts_dir, "123.py")
+    script_path = os.path.join(scripts_dir, script_name)
 
     existing_content = ""
-    if os.path.exists(py123_path):
-        with open(py123_path, "r") as f:
+    if os.path.exists(script_path):
+        with open(script_path, "r") as f:
             existing_content = f.read()
 
     # If markers exist, replace the block
@@ -117,13 +117,13 @@ def patch_123(pref_dir, dry_run=False):
         action = "appended"
 
     if dry_run:
-        print(f"[DRY RUN] Would {action} hook in: {py123_path}")
+        print(f"[DRY RUN] Would {action} hook in: {script_path}")
         return
 
     os.makedirs(scripts_dir, exist_ok=True)
-    with open(py123_path, "w") as f:
+    with open(script_path, "w") as f:
         f.write(new_content)
-    print(f"[OK] Hook {action} in: {py123_path}")
+    print(f"[OK] Hook {action} in: {script_path}")
 
 
 def remove_package(pref_dir, dry_run=False):
@@ -139,18 +139,18 @@ def remove_package(pref_dir, dry_run=False):
         print(f"[SKIP] Package not found: {pkg_path}")
 
 
-def remove_hook(pref_dir, dry_run=False):
-    """Remove the auto-start hook from 123.py."""
-    py123_path = os.path.join(pref_dir, "scripts", "123.py")
-    if not os.path.exists(py123_path):
-        print(f"[SKIP] 123.py not found: {py123_path}")
+def remove_hook(pref_dir, script_name, dry_run=False):
+    """Remove the auto-start hook from a Houdini startup script."""
+    script_path = os.path.join(pref_dir, "scripts", script_name)
+    if not os.path.exists(script_path):
+        print(f"[SKIP] {script_name} not found: {script_path}")
         return
 
-    with open(py123_path, "r") as f:
+    with open(script_path, "r") as f:
         content = f.read()
 
     if HOOK_START not in content:
-        print(f"[SKIP] No HoudiniMCP hook found in: {py123_path}")
+        print(f"[SKIP] No HoudiniMCP hook found in: {script_path}")
         return
 
     start_idx = content.index(HOOK_START)
@@ -166,11 +166,11 @@ def remove_hook(pref_dir, dry_run=False):
         new_content += "\n"
 
     if dry_run:
-        print(f"[DRY RUN] Would remove hook from: {py123_path}")
+        print(f"[DRY RUN] Would remove hook from: {script_path}")
     else:
-        with open(py123_path, "w") as f:
+        with open(script_path, "w") as f:
             f.write(new_content)
-        print(f"[OK] Hook removed from: {py123_path}")
+        print(f"[OK] Hook removed from: {script_path}")
 
 
 def main():
@@ -212,13 +212,19 @@ def main():
     print(f"Repo root:     {repo_root}")
     print()
 
+    # Patch both 123.py (new scene) and 456.py (load scene) so
+    # auto-start works regardless of how Houdini is launched.
+    startup_scripts = ["123.py", "456.py"]
+
     if args.uninstall:
         remove_package(pref_dir, dry_run=args.dry_run)
-        remove_hook(pref_dir, dry_run=args.dry_run)
+        for script in startup_scripts:
+            remove_hook(pref_dir, script, dry_run=args.dry_run)
         print("\nUninstall complete.")
     else:
         write_package(pref_dir, repo_root, dry_run=args.dry_run)
-        patch_123(pref_dir, dry_run=args.dry_run)
+        for script in startup_scripts:
+            patch_startup_script(pref_dir, script, dry_run=args.dry_run)
         print("\nInstall complete. Restart Houdini to auto-start the MCP addon.")
 
 

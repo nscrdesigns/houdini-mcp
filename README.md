@@ -51,7 +51,7 @@ python install.py
 
 This automatically:
 - Creates a Houdini package (`houdinimcp.json`) in your Houdini preferences
-- Patches `123.py` to auto-start the addon when Houdini launches
+- Patches `123.py` and `456.py` to auto-start the addon when Houdini launches
 
 The installer auto-detects your Houdini preferences directory. Use `--houdini-pref-dir` to specify it manually, or `--dry-run` to preview changes.
 
@@ -185,7 +185,7 @@ pip uninstall houdini-mcp
 
 - **Connection issues**: Make sure the Houdini addon is running (check Houdini console for startup message). Verify the MCP server can reach `localhost` on the addon's port.
 - **Port conflicts**: If port 9877 is in use, the addon automatically tries the next port in the range. Use `list_houdini_instances` to see which port was assigned.
-- **Auto-start not working**: Verify the package file exists at `{houdini_prefs}/packages/houdinimcp.json` and the hook is present in `{houdini_prefs}/scripts/123.py`. Re-run `python install.py` if needed.
+- **Auto-start not working**: Verify the package file exists at `{houdini_prefs}/packages/houdinimcp.json` and the hook is present in `{houdini_prefs}/scripts/123.py` and `456.py`. Re-run `python install.py` if needed.
 - **Module not found**: Make sure `pip install -e .` was run in the repo directory and `houdini-mcp` is on your PATH.
 - **Timeout errors**: Try simplifying requests or breaking them into smaller steps.
 

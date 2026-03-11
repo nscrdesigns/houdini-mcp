@@ -38,7 +38,7 @@ python install.py
 
 This does two things:
 1. **Creates a Houdini package** at `{houdini_prefs}/packages/houdinimcp.json` that sets environment variables (`HOUDINIMCP_ROOT`, `HOUDINIMCP_AUTO_START`)
-2. **Patches `123.py`** in `{houdini_prefs}/scripts/` with an auto-start hook that imports and starts the addon when Houdini launches
+2. **Patches `123.py` and `456.py`** in `{houdini_prefs}/scripts/` with an auto-start hook that imports and starts the addon when Houdini launches (both scripts are patched so auto-start works regardless of how Houdini is opened)
 
 The installer auto-detects your Houdini preferences directory (highest version found). Options:
 
@@ -145,7 +145,7 @@ If you skip Step 2, you can start the addon manually each session:
 1. In Houdini's Python Shell, run:
    ```python
    import sys
-   sys.path.insert(0, r"D:\Coding\houdini-mcp")  # adjust to your repo path
+   sys.path.insert(0, r"/path/to/houdini-mcp")  # adjust to your repo path
    import houdinimcp_addon
    server = houdinimcp_addon.init_houdinimcp()
    ```
@@ -170,9 +170,9 @@ pip uninstall houdini-mcp
 
 1. Verify the package file exists:
    - Windows: `C:\Users\<user>\Documents\houdini<ver>\packages\houdinimcp.json`
-2. Verify the 123.py hook exists:
-   - Windows: `C:\Users\<user>\Documents\houdini<ver>\scripts\123.py`
-   - Look for the `# --- HoudiniMCP auto-start hook ---` marker
+2. Verify the startup hooks exist:
+   - Windows: `C:\Users\<user>\Documents\houdini<ver>\scripts\123.py` and `456.py`
+   - Look for the `# --- HoudiniMCP auto-start hook ---` marker in both files
 3. Re-run `python install.py` to reinstall
 
 ### "Module not found" errors
