@@ -4,9 +4,11 @@ Step-by-step instructions for installing HoudiniMCP on a new machine.
 
 ## Prerequisites
 
-- **Houdini** 19.0 or newer
-- **Python** 3.9 or newer (with `pip`)
+- **Houdini** 19.0 or newer (tested with Houdini 21.0)
+- **Python** 3.9 or newer (with `pip`) — this is your *system* Python, separate from Houdini's embedded Python
 - **An MCP client**: Claude Code (CLI), Claude Desktop, or Cursor
+
+> **Note:** The MCP server runs in your system Python, not Houdini's embedded Python. They communicate over TCP, so version mismatches are fine.
 
 ## Step 1: Clone and install
 
@@ -27,6 +29,23 @@ Verify the install:
 ```bash
 houdini-mcp --help
 ```
+
+If the command is not found, `pip` may have installed the script to a directory not on your PATH. Common locations:
+
+| Platform | Typical script location |
+|----------|------------------------|
+| Windows  | `C:\Users\<user>\AppData\Local\Programs\Python\Python3XX\Scripts\` |
+| Windows (user install) | `C:\Users\<user>\AppData\Roaming\Python\Python3XX\Scripts\` |
+| macOS/Linux | `~/.local/bin/` (user install) or `/usr/local/bin/` (system) |
+
+You can find it with:
+```bash
+pip show -f houdini-mcp | grep houdini-mcp
+# or on Windows:
+python -c "import sysconfig; print(sysconfig.get_path('scripts'))"
+```
+
+Add the scripts directory to your PATH, or use the full path to `houdini-mcp` in your MCP client config (see Step 3).
 
 ## Step 2: Set up Houdini auto-start
 
@@ -64,7 +83,17 @@ Choose one of the following:
 
 ### Claude Code (CLI)
 
-Add to your Claude Code MCP configuration (user-scope `~/.claude.json` or project-scope `.mcp.json`):
+Add to your Claude Code MCP configuration. You can configure at user scope (applies to all projects) or project scope:
+
+- **User scope**: `~/.claude.json` (Linux/macOS) or `C:\Users\<user>\.claude.json` (Windows)
+- **Project scope**: `.mcp.json` in the project root
+
+To add via the CLI:
+```bash
+claude mcp add houdini -- houdini-mcp
+```
+
+Or manually add to the JSON config:
 
 ```json
 {
@@ -93,11 +122,25 @@ If `houdini-mcp` is not on your PATH, use the full path to the executable:
 
 Go to Claude > Settings > Developer > Edit Config. Edit `claude_desktop_config.json`:
 
+- **Windows**: `%APPDATA%\Claude\claude_desktop_config.json`
+- **macOS**: `~/Library/Application Support/Claude/claude_desktop_config.json`
+
 ```json
 {
   "mcpServers": {
     "houdini": {
       "command": "houdini-mcp"
+    }
+  }
+}
+```
+
+If `houdini-mcp` is not on PATH, use the full path (forward slashes on Windows):
+```json
+{
+  "mcpServers": {
+    "houdini": {
+      "command": "C:/Users/You/AppData/Local/Programs/Python/Python312/Scripts/houdini-mcp.exe"
     }
   }
 }
